@@ -1,6 +1,8 @@
 = collator
 
-Description goes here.
+An opinionated CSS and JS concatenator.
+
+Will concatenate anything it can. With source maps.
 
 == Contributing to collator
  
