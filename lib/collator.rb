@@ -21,12 +21,14 @@ class Crawler
   end
 end
 
-# Accumulator for sources and their source maps
+# Accumulator for sources and their source maps.
+# http://blog.safaribooksonline.com/2013/12/06/source-maps-uglifyjs2-coffeescript/
+# https://github.com/mishoo/UglifyJS2/issues/145
+# http://stackoverflow.com/questions/14207983
 class Splicer
   # Creates a new Splicer, doesn't accept any arguments
   def initialize
     @sources = StringIO.new
-    @sourcemap_gap = StringIO.new
     @maps = []
   end
 
@@ -55,20 +57,26 @@ class Splicer
   def add_script(url, source, source_map_body = nil)
     without_sourcemap_trailer = remove_sourcemap_declaration(source)
     if source_map_body
-      map_from_zero = SourceMap::Map.from_json(source_map_body)
-      # First use bump_map() which needs @sourcemap_gap
-      @maps << bump_map(map_from_zero)
-      # Start counting offsets from zero
-      @sourcemap_gap = StringIO.new
+      @maps << SourceMap::Map.from_json(source_map_body)
     else
-      # Record the script passed "verbatim" into a separate buffer, which we can use
-      # for counting lines to "bump" the next source map by
-      @sourcemap_gap.puts(without_sourcemap_trailer)
+      @maps << generate_identity_map(url, without_sourcemap_trailer)
     end
-  
     @sources.puts(without_sourcemap_trailer)
   end
-
+  
+  # Generate a source map which refers a whole chunk of the concatenated
+  # body (the whole passed source_body) to the file at source_url. It's an
+  # identity map because it maps code to itself basically.
+  def generate_identity_map(source_url, source_body)
+    mp = []
+    source_body.split("\n").each_with_index do | line, n |
+      last_col = line.length
+      mp << SourceMap::Mapping.new(source_url, SourceMap::Offset.new(n, 0), SourceMap::Offset.new(n, 0))
+      mp << SourceMap::Mapping.new(source_url, SourceMap::Offset.new(n, last_col), SourceMap::Offset.new(n, last_col))
+    end
+    SourceMap::Map.new(mp)
+  end
+  
   # Returns the compiled script string that 
   # can be written into a file. 
   # NOTE: The returned script will not include the sourcemap URL declaration!
@@ -86,6 +94,8 @@ class Splicer
   
   # Concatenates the source maps that have been buffered so far.
   # They add up recursively, adding offsets as they go.
+  # It's horrible we have to do this but UglifyJS2 does not support
+  # source map sections
   def compile_sourcemap
     combo_map = nil
     # SourceMap::Map#+ does source map merges, so...
@@ -94,26 +104,6 @@ class Splicer
     end
     combo_map.as_json # to_json of this one does not conform to ActiveSupport
   end
-  
-  # Transform the passed source map, "bumping" it's generated line offsets by
-  # a certain number of lines. The number of lines get computed from sourcemap_gap.
-  # This allows us to tell the source map "before you in the generated file is a segment
-  # with no sourcemap". This way we can safely concatenate those maps later even though
-  # they do not cover the whole generated script continuously.
-  def bump_map(source_map)
-    line_count = @sourcemap_gap.string.split("\n").length
-    
-    # Don't rewrite the map if it doesn't need shifting
-    return source_map if line_count.zero?
-    
-    puts "Bumping the source map by #{line_count} lines to accomodate for a segment w/o one"
-    @sourcemap_gap = StringIO.new
-    mappings = source_map.map do |m|
-      SourceMap::Mapping.new( m.source, m.generated + line_count, m.original, m.name)
-    end
-    SourceMap::Map.new(mappings, source_map.filename)
-  end
-
   
   # Strips the passed string of it's source map declaration.
   # The declaration is usually added after the code, and it
